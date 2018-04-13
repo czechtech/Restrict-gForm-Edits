@@ -1,4 +1,5 @@
 var PRUNE_RATE_MINUTES = 30;
+var FIRST_ATTEMPT ="(First Attempt)";
 // Global Variables: https://stackoverflow.com/questions/24721226/how-to-define-global-variable-in-google-apps-script
 
 /********************************************************
@@ -148,8 +149,10 @@ function onClickSelectLoginQuestion(e) {
     // TODO this is very limiting
     var item = form.getItems(FormApp.ItemType.LIST)[0];
     var settings = PropertiesService.getDocumentProperties();
-    ui.alert("Will use the first Dropdown question:\n   "+item.getTitle());
-    settings.setProperty("LOGIN_QUESTION_ID", item.getId());
+    var result = ui.alert("Select Login Question","Use the first Dropdown question:\n   \""+item.getTitle()+"\"", ui.ButtonSet.YES_NO);
+    if (result == ui.Button.YES) {
+      settings.setProperty("LOGIN_QUESTION_ID", item.getId());
+    }
   }
 }
 
@@ -253,17 +256,19 @@ function adjustFormSettings() {
 
 function addLoginSection() {
   var form = FormApp.getActiveForm();
+  var settings = PropertiesService.getDocumentProperties();
   if(form.getItems()[0].getType() != FormApp.ItemType.PAGE_BREAK) {
     var sectionbreak = form.addPageBreakItem();
     form.moveItem(sectionbreak.getIndex(), 0);
   }
   var item = form.addListItem();
   item.setTitle("Quiz Login: Select your email address, or choose \'First Attempt\':");
-  item.setHelpText("This quiz has re-take restrictions enabled.");
+  if(settings.getProperty("RESTRICTION_DURATION") != null) {
+    item.setHelpText("(Re-takes are enabled "+settings.getProperty("RESTRICTION_DURATION")+" hours after submission.)");
+  }
   item.setRequired(true);
   // TODO: item.setPoints(0);
   form.moveItem(item.getIndex(), 0);
-  var settings = PropertiesService.getDocumentProperties();
   settings.setProperty("LOGIN_QUESTION_ID", item.getId());
   onClickRefreshAccessList(); // this will display an alert if it fails
 }
@@ -272,8 +277,8 @@ function verifyLoginQuestion() {
   var form = FormApp.getActiveForm();
   var settings = PropertiesService.getDocumentProperties();
   var loginQuestionID = settings.getProperty("LOGIN_QUESTION_ID");
-  var item = form.getItemById(loginQuestionID);
-  if(item != null) {
+  if(loginQuestionID != null && form.getItemById(loginQuestionID) != null) {
+    var item = form.getItemById(loginQuestionID);
     if(item.getType() == FormApp.ItemType.LIST) {
       // TODO: Verify the item settings (0 points, required, determines next section)
       return true;
@@ -292,10 +297,7 @@ function onTimeToRefreshLogins(e) {
   if(verifyAuthorization()) {
     var result = refreshLoginChoices();
     if(result == false) {
-      var ownerEmail = form.getEditors()[0].getEmail();
-      var formName = form.getTitle();
-      var formURL = form.getEditUrl();
-      GmailApp.sendEmail(ownerEmail, "Time-restricted Form Edits Script Error: onTimeToRefreshLogins", formName+"\n\nonTimeToRefreshLogins has failed with an error.\n\n\n"+formURL);
+      emailAlert("Time-restricted Form Edits Script Error: onTimeToRefreshLogins", "onTimeToRefreshLogins has failed with an error.");
     }
     var preventedEmails = listPreventedLogins();
     if(preventedEmails.length == 0) {
@@ -335,7 +337,7 @@ function listPermissibleLogins() {
   var allResponses = form.getResponses();
   var cutoff = new Date(Date.now().valueOf() - 3.61e6*settings.getProperty("RESTRICTION_DURATION"));
   var permissibleRetakeLogins = [];
-  permissibleRetakeLogins.push("(First Attempt)"); // PLACE-HOLDER until all possibilities can be enumerated.
+  permissibleRetakeLogins.push(FIRST_ATTEMPT); // PLACE-HOLDER until all possibilities can be enumerated.
   allResponses.forEach(function(response) {
     if(response.getTimestamp() < cutoff) {
       permissibleRetakeLogins.push(response.getRespondentEmail());
@@ -394,14 +396,21 @@ function processSubmission(response) {
   // Check & Report mismatched login/email addresses
   var form = FormApp.getActiveForm(); // e.source
   var settings = PropertiesService.getDocumentProperties();
-  var respondentsEmail = response.getRespondentEmail();
-  var submittedEmail = "[login question left blank]"; // default, should never happen
-  var item = form.getItemById(settings.getProperty("LOGIN_QUESTION_ID"));  
-  if(response.getResponseForItem(item) != null) {
-    var submittedEmail = response.getResponseForItem(item).getResponse();
-  }
-  if(submittedEmail != respondentsEmail) {      
+  var id = settings.getProperty("LOGIN_QUESTION_ID"); // Status verified above
+  var item = form.getItemById(id); // Status verified above 
+  var respondentsEmail = response.getRespondentEmail(); // .toUpperCase().trim()
+  var submittedEmail = response.getResponseForItem(item).getResponse(); // .toUpperCase().trim()
+  if(submittedEmail != respondentsEmail && submittedEmail != FIRST_ATTEMPT) {
     emailAlert("Mismatched email on Form Submission", "Submission from: "+respondentsEmail+"\nClaiming to be: "+submittedEmail);
+    return false;
+  }
+  
+  // Report quizzes retaken too soon -- Not needed
+  if(listPreventedLogins().indexOf(respondentsEmail) >= 0) {
+  var submitTime = response.getTimestamp();
+  var nowTime = new Date(Date.now());
+    emailAlert("Quiz Retake Too Soon","Submission from: "+respondentsEmail+"\nSubmitted at: "+nowTime+"\nPrevious submission at: "+submitTime);
+    return false;
   }
   return true;
 }
@@ -426,8 +435,7 @@ function sendReauthorizationRequest() {
   var today = new Date().toDateString();
   if (lastAuthEmailDate != today) {
     if (MailApp.getRemainingDailyQuota() > 0) {
-      var template =
-          HtmlService.createTemplateFromFile('AuthorizationEmail');
+      var template = HtmlService.createTemplateFromFile('AuthorizationEmail');
       template.url = authInfo.getAuthorizationUrl();
       template.notice = NOTICE;
       var message = template.evaluate();
@@ -447,15 +455,15 @@ function sendReauthorizationRequest() {
    Email Messages
  ********************************************************/
 function emailAlert(subject, message) {
-  var form = FormApp.getActiveForm(); // e.source
+  var form = FormApp.getActiveForm();
   var ownerEmail = form.getEditors()[0].getEmail();
   var formName = form.getTitle();
   var formURL = form.getEditUrl();
-  GmailApp.sendEmail(ownerEmail, subject, formName+"\n\n"+message+"\n\n\n"+formURL);
+  MailApp.sendEmail(ownerEmail, subject, formName+"\n\n"+message+"\n\n\n"+formURL);
 }
 
 // TODO: Display list of active time-restrictions
 // TODO: Implement the default "Help" menu item
-// TODO: New Add-On: **Auto "Import Grades" upon every submission**
-// TODO: New Add-On: Max Score/Scale Score/Ceiling/Floor 
-// TODO: Store a count of submissions per user in the Form's Settings
+// TODO: New Forms Add-On: **Auto "Import Grades" upon every submission**
+// TODO: Possible New Add-On: Max Score/Scale Score/Ceiling/Floor 
+// TODO: Store a count of submissions per user in the Form's Settings?
